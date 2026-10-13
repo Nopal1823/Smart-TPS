@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # 1. DATABASE (PostgreSQL)
+  db:
+    image: postgres:15
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=sensor_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=sadewa_super_secure  # Password DB di Server
+    ports:
+      - "5430:5432" # <-- REQUEST ANDA: Host 5430, Container 5432
+
+  # 2. WEB APP (Django Website)
+  web:
+    build: .
+    restart: always
+    command: gunicorn backend_tpa.wsgi:application --bind 0.0.0.0:8000
+    volumes:
+      - .:/app
+      - static_volume:/app/staticfiles
+#      - media_volume:/app/media
+    expose:
+      - 8000
+    depends_on:
+      - db
+    environment:
+      - DJANGO_SECRET_KEY=ini_rahasia_banget_jangan_disebar_123
+      - DEBUG=0
+      - ALLOWED_HOSTS=localhost,127.0.0.1,4.145.89.236
+      - DB_HOST=db
+      - DB_NAME=sensor_db
+      - DB_USER=postgres
+      - DB_PASS=sadewa_super_secure
+      - DB_PORT=5432 
+
+  # 3. LISTENER (Robot MQTT)
+  listener:
+    build: .
+    restart: always
+    command: python manage.py run_listener
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+    environment:
+      - DB_HOST=db
+      - DB_NAME=sensor_db
+      - DB_USER=postgres
+      - DB_PASS=sadewa_super_secure
+      - DB_PORT=5432
+
+  # 4. NGINX (Pintu Gerbang Web)
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "8001:80" # <-- REQUEST ANDA: Web di Port 8001
+    volumes:
+      - static_volume:/app/staticfiles
+      - ./media:/app/media
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - web
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:

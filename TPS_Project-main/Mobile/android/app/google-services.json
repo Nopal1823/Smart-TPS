@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "132874859790",
+    "project_id": "smart-tpa-lampung",
+    "storage_bucket": "smart-tpa-lampung.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:132874859790:android:cdbff0b886e10f0e6ad35f",
+        "android_client_info": {
+          "package_name": "com.example.pm_tpa"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD8gTK3T9HlHoBCEawiWtEVCrsziYkgfz8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
