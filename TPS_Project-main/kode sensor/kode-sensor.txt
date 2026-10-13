@@ -1,0 +1,217 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// ==========================================================
+// 1. KONFIGURASI JARINGAN
+// ==========================================================
+const char* ssid = "Ibu";         
+const char* password = "Wede#05Oktober"; 
+
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
+const char* mqtt_topic = "smart-tpa/sensor/data";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// ==========================================================
+// 2. KONFIGURASI PIN
+// ==========================================================
+const int PIN_MQ2   = 39; 
+const int PIN_MQ3   = 35; 
+const int PIN_MQ4   = 33; 
+const int PIN_MQ8   = 34; 
+const int PIN_MQ9   = 36; 
+const int PIN_MQ135 = 32; 
+
+// ==========================================================
+// 3. PARAMETER AI & KALIBRASI (FINAL TUNING - AMAN)
+// ==========================================================
+
+// Urutan Array: MQ2, MQ3, MQ4, MQ8, MQ9, MQ135
+float calFactor[6] = { 
+  0.12000, // MQ2 
+  0.50000, // MQ3 
+  5.00000, // MQ4 
+  1.96652, // MQ8 
+  0.15000, // MQ9 
+  0.80000  // MQ135 
+};
+
+// Mean & Scale (JANGAN DIUBAH)
+float scalerMean[6]  = { 231.9027, 673.8973, 433.5892, 546.6919, 165.5676, 234.5135 };
+float scalerScale[6] = { 25.2098, 57.5496, 54.8672, 62.9114, 37.7257, 44.5146 };
+
+// Centroids
+float centroids[3][6] = {
+  { -0.3860, 0.8491, -0.8454, -0.8651, -0.4742, -0.7835 }, // Aman
+  { -0.4292, -1.4695, 0.4933, 0.9168, -0.3872, 0.3658 },   // Sedang
+  { 1.3239, -0.1619, 1.2663, 0.8263, 1.4669, 1.2778 }      // Bau Banget
+};
+
+// Array Nama Sensor untuk Display (Sesuai urutan di atas)
+const char* sensorNames[6] = {"MQ 2", "MQ 3", "MQ 4", "MQ 8", "MQ 9", "MQ 135"};
+
+// ==========================================================
+// VARIABEL GLOBAL
+// ==========================================================
+unsigned long lastMsg = 0;
+const int PUBLISH_INTERVAL = 2000;
+
+void setup_wifi();
+void reconnect_mqtt();
+int predictKMeans(float data[]);
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(PIN_MQ2, INPUT);
+  pinMode(PIN_MQ3, INPUT);
+  pinMode(PIN_MQ4, INPUT);
+  pinMode(PIN_MQ8, INPUT);
+  pinMode(PIN_MQ9, INPUT);
+  pinMode(PIN_MQ135, INPUT);
+
+  Serial.println("SMART-TPA System Starting...");
+  delay(2000);
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect_mqtt();
+  }
+  client.loop();
+
+  unsigned long now = millis();
+  if (now - lastMsg > PUBLISH_INTERVAL) {
+    lastMsg = now;
+
+    // 1. BACA RAW
+    float raw[6];
+    raw[0] = analogRead(PIN_MQ2);
+    raw[1] = analogRead(PIN_MQ3);
+    raw[2] = analogRead(PIN_MQ4);
+    raw[3] = analogRead(PIN_MQ8);
+    raw[4] = analogRead(PIN_MQ9);
+    raw[5] = analogRead(PIN_MQ135);
+
+    // 2. PROSES KALIBRASI
+    float processedData[6]; 
+    float calibratedData[6]; // Array untuk menyimpan nilai fix kalibrasi
+    
+    Serial.println("\n=== HASIL BACAAN SENSOR (TERKALIBRASI) ===");
+    
+    for (int i = 0; i < 6; i++) {
+      // Hitung nilai kalibrasi
+      float val = raw[i] * calFactor[i];
+      calibratedData[i] = val; // Simpan untuk dikirim ke MQTT nanti
+      
+      // Siapkan data untuk AI (Scaling)
+      processedData[i] = (val - scalerMean[i]) / scalerScale[i];
+      
+      // Display ke Serial Monitor
+      Serial.print(sensorNames[i]); 
+      Serial.print(" : ");
+      Serial.println(val, 0); 
+    }
+    Serial.println("==========================================");
+
+    // 3. PREDIKSI AI
+    int clusterResult = predictKMeans(processedData);
+    
+    String statusBau = "";
+    if (clusterResult == 0) statusBau = "Aman";
+    else if (clusterResult == 1) statusBau = "Sedang";
+    else statusBau = "Bahaya";
+
+    // 4. KIRIM MQTT (UPDATE: TAMBAH DATA TERKALIBRASI)
+    // Kapasitas JSON dinaikkan sedikit biar muat
+    StaticJsonDocument<768> doc;
+    
+    // a. Masukkan Data Mentah (sensors_raw) - Tetap ada buat backup
+    JsonObject sensorsRaw = doc.createNestedObject("sensors_raw");
+    sensorsRaw["mq2"] = raw[0];
+    sensorsRaw["mq3"] = raw[1];
+    sensorsRaw["mq4"] = raw[2];
+    sensorsRaw["mq8"] = raw[3];
+    sensorsRaw["mq9"] = raw[4];
+    sensorsRaw["mq135"] = raw[5];
+
+    // b. Masukkan Data Terkalibrasi (sensors_cal) - INI YANG BARU
+    // Kita kirim sebagai Integer (bulat) biar rapi di dashboard
+    JsonObject sensorsCal = doc.createNestedObject("sensors_cal");
+    sensorsCal["mq2"] = (int)calibratedData[0];
+    sensorsCal["mq3"] = (int)calibratedData[1];
+    sensorsCal["mq4"] = (int)calibratedData[2];
+    sensorsCal["mq8"] = (int)calibratedData[3];
+    sensorsCal["mq9"] = (int)calibratedData[4];
+    sensorsCal["mq135"] = (int)calibratedData[5];
+
+    // c. Hasil AI
+    doc["ai_cluster"] = clusterResult;
+    doc["ai_status"] = statusBau;
+
+    char jsonBuffer[768];
+    serializeJson(doc, jsonBuffer);
+
+    Serial.print("Sending MQTT Packet... ");
+    if (client.publish(mqtt_topic, jsonBuffer)) {
+      Serial.println("[OK]");
+      // Serial.println(jsonBuffer); // Uncomment kalau mau lihat isi JSON di serial
+    } else {
+      Serial.println("[FAILED]");
+    }
+    
+    Serial.print(">> KEPUTUSAN AI: ");
+    Serial.println(statusBau);
+    Serial.println(); 
+  }
+}
+
+// Fungsi Prediksi K-Means
+int predictKMeans(float data[]) {
+  float minDistance = 9999999.0;
+  int closestCluster = -1;
+
+  for (int k = 0; k < 3; k++) {
+    float distance = 0.0;
+    for (int i = 0; i < 6; i++) {
+      float diff = data[i] - centroids[k][i];
+      distance += (diff * diff);
+    }
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestCluster = k;
+    }
+  }
+  return closestCluster;
+}
+
+void setup_wifi() {
+  delay(10);
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
+}
+
+void reconnect_mqtt() {
+  while (!client.connected()) {
+    Serial.print("MQTT Connecting...");
+    String clientId = "ESP32-Final-" + String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str())) {
+      Serial.println("Connected!");
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(client.state());
+      delay(5000);
+    }
+  }
+}
